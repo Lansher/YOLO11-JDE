@@ -136,7 +136,11 @@ def verify_image_label(args):
                     assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
                     points = lb[:, 1:]
                 assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
-                assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
+                # For tag mode (JDE task), only check first 5 columns (class + bbox), allow track_id (6th column) to be -1
+                if tag and lb.shape[1] == 6:
+                    assert lb[:, :5].min() >= 0, f"negative label values in class/bbox {lb[:, :5][lb[:, :5] < 0]}"
+                else:
+                    assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
 
                 # All labels
                 max_cls = lb[:, 0].max()  # max label count

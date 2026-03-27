@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""兼容入口：转发到 `scripts/track.py`。"""
+"""兼容入口：转发到 `scripts/train_optimized.py`。"""
 import subprocess
 import sys
 from pathlib import Path
 
 
 def main() -> None:
-    script = Path(__file__).resolve().parent / "scripts" / "track.py"
+    script = Path(__file__).resolve().parent / "scripts" / "train_optimized.py"
     raise SystemExit(subprocess.call([sys.executable, str(script)] + sys.argv[1:]))
 
 

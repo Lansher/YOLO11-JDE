@@ -171,3 +171,26 @@ pnnx*
 calibration_*.npy
 /reid_xps/
 /tracker/evaluation/outputs/
+
+# Background training logs (see scripts/offline_train.py)
+/logs/
+!/logs/.gitkeep
+
+# Local large assets (videos, recordings, generated outputs) --------------------------------------
+/video/
+/video_outputs/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.bag
+*.mcap
+*.svo
+
+# Large archives / binaries
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar

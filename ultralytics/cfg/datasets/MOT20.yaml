@@ -1,0 +1,11 @@
+# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
+# 此配置文件用于MOT20数据集（已转换为YOLO格式）
+# 数据集路径应指向包含MOT20和CrowdHuman合并后的文件夹
+path: /root/autodl-tmp/MOT20_YOLO  # dataset root dir
+train: images/train  # train images (relative to 'path')
+val: images/val  # val images (relative to 'path')
+test: images/test  # test images (optional)
+
+# Classes
+names:
+  0: person

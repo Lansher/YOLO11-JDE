@@ -1,5 +1,14 @@
-import os
+#!/usr/bin/env python3
+"""兼容入口：转发到 `scripts/offline_train.py`。"""
+import subprocess
 import sys
-from datetime import datetime
+from pathlib import Path
 
-os.system("nohup sh -c '" + sys.executable + f" train.py > ./../logs/train_{datetime.now().strftime('%y-%m-%d_%H-%M-%S')}.txt 2>&1' &")
+
+def main() -> None:
+    script = Path(__file__).resolve().parent / "scripts" / "offline_train.py"
+    raise SystemExit(subprocess.call([sys.executable, str(script)] + sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    main()

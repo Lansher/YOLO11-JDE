@@ -1,21 +1,14 @@
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+#!/usr/bin/env python3
+"""兼容入口：转发到 `scripts/validate.py`。"""
+import subprocess
+import sys
+from pathlib import Path
 
-from ultralytics import YOLO
-from tracker.evaluation.mot_callback import mot_eval
 
-model = YOLO('./reid_xps/CH-jde-64b-100e_TBHS_m075_1280px_20241129-220651/weights/best.pt', task="jde")
-model.add_callback("on_val_start", mot_eval)
+def main() -> None:
+    script = Path(__file__).resolve().parent / "scripts" / "validate.py"
+    raise SystemExit(subprocess.call([sys.executable, str(script)] + sys.argv[1:]))
 
-model.val(
-    project='reid_xps',
-    name=f'MOT20-test',
-    data='crowdhuman.yaml',
-    imgsz=640,
-    device=[5],
-    #max_det=150,
-    tracker='yolojdetracker.yaml',
-    half=False,
-    amp=False,
-)
+
+if __name__ == "__main__":
+    main()

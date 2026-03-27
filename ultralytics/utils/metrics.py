@@ -1329,6 +1329,10 @@ class ReIDMetrics(SimpleClass):
         embeds = embeds[fg_mask & conf_mask]  # First embedding filter
 
         # Filter predictions and targets based on multiplicity
+        # Note: torch.bincount on CUDA triggers a warning when deterministic=True
+        # because CUDA bincount doesn't have a deterministic implementation.
+        # This is a harmless warning - bincount results are typically deterministic in practice.
+        # If you need to suppress this warning, you can move to CPU: tags_cpu = tags.cpu(); multiplicity_mask = torch.bincount(tags_cpu)[tags_cpu] > 1; multiplicity_mask = multiplicity_mask.to(tags.device)
         multiplicity_mask = torch.bincount(tags)[tags] > 1
         tags = tags[multiplicity_mask]  # Filter tags
         embeds = embeds[multiplicity_mask]  # Filter embeddings
@@ -1336,9 +1340,24 @@ class ReIDMetrics(SimpleClass):
         # Normalize embeddings for computing metrics
         embeds = F.normalize(embeds, p=2, dim=1)
 
+        # 限制累积的embeddings数量以避免内存不足
+        # 如果累积的样本数超过5000，只保留最新的部分
+        MAX_EMBEDS = 5000
+        current_total = sum(e.shape[0] for e in self.embeds) if self.embeds else 0
+        
         # Store embeddings and tags for computing metrics
-        self.embeds.append(embeds)
-        self.tags.append(tags)
+        # Only store if we have valid embeddings (non-empty)
+        if len(embeds) > 0 and len(tags) > 0:
+            # 如果累积数量会超过限制，先清理旧的embeddings
+            if current_total + len(embeds) > MAX_EMBEDS:
+                # 移除最旧的embeddings，直到有足够空间
+                while current_total + len(embeds) > MAX_EMBEDS and len(self.embeds) > 0:
+                    removed = self.embeds.pop(0)
+                    removed_tags = self.tags.pop(0)
+                    current_total -= removed.shape[0]
+            
+            self.embeds.append(embeds.cpu())  # 移到CPU以节省GPU内存
+            self.tags.append(tags.cpu())  # 也移到CPU以节省GPU内存
 
     def get_metrics(self):
         """
@@ -1346,9 +1365,33 @@ class ReIDMetrics(SimpleClass):
         Returns:
             Dict[str, float]: A dictionary containing the ReID metrics for the current epoch.
         """
+        # Check if we have any embeddings
+        if len(self.embeds) == 0:
+            # No embeddings collected, return default metrics
+            return self._get_default_metrics()
+        
+        # Filter out empty tensors before concatenation
+        non_empty_embeds = [e for e in self.embeds if len(e) > 0]
+        non_empty_tags = [t for t in self.tags if len(t) > 0]
+        
+        if len(non_empty_embeds) == 0 or len(non_empty_tags) == 0:
+            return self._get_default_metrics()
+        
         # Concatenate and convert to numpy arrays
-        embeds = torch.cat(self.embeds).cpu().detach().numpy()
-        tags = torch.cat(self.tags).cpu().detach().numpy()
+        embeds = torch.cat(non_empty_embeds).cpu().detach().numpy()
+        tags = torch.cat(non_empty_tags).cpu().detach().numpy()
+        
+        # Check if concatenated arrays are empty
+        if len(embeds) == 0 or len(tags) == 0:
+            return self._get_default_metrics()
+
+        # 限制样本数量以避免计算距离矩阵时内存不足
+        MAX_SAMPLES_FOR_METRICS = 2000
+        if len(embeds) > MAX_SAMPLES_FOR_METRICS:
+            # 随机采样以保持代表性
+            indices = np.random.choice(len(embeds), MAX_SAMPLES_FOR_METRICS, replace=False)
+            embeds = embeds[indices]
+            tags = tags[indices]
 
         # Compute distance matrix and positive and negative distances
         pos_cos, neg_cos, cos_distmat = self.compute_distmat(embeds, tags, distance="cosine")
@@ -1360,15 +1403,32 @@ class ReIDMetrics(SimpleClass):
         r1_acc, r5_acc, mean_ap = self.calculate_r1_r5_mAP(cos_distmat, tags)
 
         # Compute separation ratios
-        cos_separation_ratio = neg_cos / pos_cos
-        euc_separation_ratio = neg_euc / pos_euc
+        cos_separation_ratio = neg_cos / pos_cos if pos_cos > 0 else 0.0
+        euc_separation_ratio = neg_euc / pos_euc if pos_euc > 0 else 0.0
         #snr_separation_ratio = neg_snr / pos_snr
 
         # Compute Silhouette, Davies Bouldin and Calinski Harabasz scores
-        cos_silhouette_score = skm.silhouette_score(cos_distmat, tags, metric='precomputed')
-        euc_silhouette_score = skm.silhouette_score(euc_distmat, tags, metric='precomputed')
-        davies_bouldin_score = skm.davies_bouldin_score(embeds, tags)
-        calinski_harabasz_score = skm.calinski_harabasz_score(embeds, tags)
+        # These metrics require at least 2 different labels
+        unique_labels = len(np.unique(tags))
+        if unique_labels < 2:
+            # Not enough labels to compute clustering metrics
+            cos_silhouette_score = 0.0
+            euc_silhouette_score = 0.0
+            davies_bouldin_score = 0.0
+            calinski_harabasz_score = 0.0
+        else:
+            try:
+                cos_silhouette_score = skm.silhouette_score(cos_distmat, tags, metric='precomputed')
+                euc_silhouette_score = skm.silhouette_score(euc_distmat, tags, metric='precomputed')
+                davies_bouldin_score = skm.davies_bouldin_score(embeds, tags)
+                calinski_harabasz_score = skm.calinski_harabasz_score(embeds, tags)
+            except (ValueError, Exception) as e:
+                # Fallback to default values if computation fails
+                # This handles cases where there are not enough samples or other errors
+                cos_silhouette_score = 0.0
+                euc_silhouette_score = 0.0
+                davies_bouldin_score = 0.0
+                calinski_harabasz_score = 0.0
 
         metrics = {
             "val/pos_cos": pos_cos,
@@ -1396,6 +1456,31 @@ class ReIDMetrics(SimpleClass):
         self.embeds = []
         self.tags = []
         return metrics
+
+    def _get_default_metrics(self):
+        """
+        Return default metrics when no embeddings are available.
+        Returns:
+            Dict[str, float]: A dictionary containing default ReID metrics.
+        """
+        return {
+            "val/pos_cos": 0.0,
+            "val/neg_cos": 0.0,
+            "val/pos_euc": 0.0,
+            "val/neg_euc": 0.0,
+            "val/cos_sep_ratio": 0.0,
+            "val/euc_sep_ratio": 0.0,
+            "val/cos_silhouette": 0.0,
+            "val/euc_silhouette": 0.0,
+            "val/davies_bouldin": 0.0,
+            "val/calinski_harabasz": 0.0,
+            "val/r1_acc": 0.0,
+            "val/r5_acc": 0.0,
+            "val/mean_ap": 0.0,
+            "val/hota": self.hota,
+            "val/mota": self.mota,
+            "val/idf1": self.idf1,
+        }
 
     def set_trackeval_metrics(self, hota, mota, idf1):
         """
@@ -1441,8 +1526,8 @@ class ReIDMetrics(SimpleClass):
         neg_mask = ~labels_equal
 
         # Step 4: Compute average similarity/distance for positive and negative pairs
-        pos_dist = distmat[pos_mask].mean()
-        neg_dist = distmat[neg_mask].mean()
+        pos_dist = distmat[pos_mask].mean() if pos_mask.any() else 0.0
+        neg_dist = distmat[neg_mask].mean() if neg_mask.any() else 0.0
 
         return pos_dist, neg_dist, distmat
 

@@ -1,0 +1,13 @@
+tracker_type: jdetracker # tracker type, ['botsort', 'bytetrack', 'smiletrack']
+
+# Tracking arguments - 针对MOT20高密度场景优化
+track_buffer: 50 # buffer to calculate the time when to remove tracks (增加以处理遮挡)
+conf_thresh: 0.3 # threshold for detection (降低以捕获更多目标)
+first_match_thresh: 0.05 # threshold for matching the first association (更宽松以处理高密度)
+second_match_thresh: 0.8 # threshold for matching the second association (适中的二次匹配)
+new_match_thresh: 0.65 # threshold for creating a new track (适中的新轨迹创建)
+
+# ReID arguments
+with_reid: True  # always True for this tracker
+
+# 注意：这些是初始优化值，建议使用evolve_mot20.py进一步优化

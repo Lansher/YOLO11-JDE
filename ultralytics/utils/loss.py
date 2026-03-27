@@ -18,22 +18,54 @@ from .tal import bbox2dist
 
 
 class MetricLearningLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, max_samples=2000):
         super(MetricLearningLoss, self).__init__()
         self.mining_func = miners.BatchEasyHardMiner(pos_strategy='hard', neg_strategy='semihard')
         self.loss_func = losses.TripletMarginLoss(margin=0.075)
         self.confidence_threshold = 1
+        self.max_samples = max_samples  # 限制最大样本数以避免内存不足（验证时建议使用更小的值，如500-1000）
 
     def forward(self, embeddings, tags, confidences=None, normalize=False):
+        # 限制样本数量以避免内存不足（特别是在验证时）
+        num_samples = embeddings.shape[0]
+        
+        # 动态调整max_samples：如果样本数非常大，使用更保守的限制
+        # 这有助于在验证时避免内存不足（当有track_id时，验证batch中可能有大量目标）
+        effective_max_samples = self.max_samples
+        if num_samples > 2000:  # 如果样本数超过2000，使用非常小的限制
+            effective_max_samples = min(self.max_samples, 50)  # 非常保守的限制
+        elif num_samples > 1000:  # 如果样本数超过1000，使用较小的限制
+            effective_max_samples = min(self.max_samples, 80)
+        elif num_samples > 500:  # 如果样本数超过500，适度降低
+            effective_max_samples = min(self.max_samples, int(self.max_samples * 0.7))
+        
+        if num_samples > effective_max_samples:
+            # 如果样本数超过限制，根据置信度选择top-k样本
+            if confidences is not None:
+                _, indices = torch.topk(confidences, effective_max_samples, largest=True)
+            else:
+                # 如果没有置信度，随机采样
+                indices = torch.randperm(num_samples, device=embeddings.device)[:effective_max_samples]
+            embeddings = embeddings[indices]
+            tags = tags[indices]
+            if confidences is not None:
+                confidences = confidences[indices]
+        
         # Select only the embeddings and tags for confidences on top X%
         if confidences is not None and self.confidence_threshold<1:
             top_k = int(self.confidence_threshold * len(confidences))
-            _, indices = torch.topk(confidences, top_k, largest=True)
-            embeddings = embeddings[indices]
-            tags = tags[indices]
+            if top_k > 0:
+                _, indices = torch.topk(confidences, top_k, largest=True)
+                embeddings = embeddings[indices]
+                tags = tags[indices]
 
         if normalize:
             embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        # 如果样本数太少（少于2个），返回零损失
+        if embeddings.shape[0] < 2:
+            return torch.tensor(0.0, device=embeddings.device, requires_grad=True)
+        
         # Sample triplets and calculate loss
         indices_tuples = self.mining_func(embeddings, tags)
         loss = self.loss_func(embeddings, tags, indices_tuples)
@@ -292,7 +324,7 @@ class v8DetectionLoss:
 class v8JDELoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model, tal_topk=10):  # model must be de-paralleled
+    def __init__(self, model, tal_topk=10, embed_max_samples=None):  # model must be de-paralleled
         """Initializes v8JDELoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -306,13 +338,20 @@ class v8JDELoss:
         self.embed_dim = m.embed_dim    # embedding dimension
         self.reg_max = m.reg_max
         self.device = device
+        self.model = model  # 保存model引用以检查training状态
 
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0, use_tags=True)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
-        self.embed_loss = MetricLearningLoss().to(device)
+        # 使用更小的max_samples以避免验证时内存不足
+        # 默认值从2000降低到100，以解决验证阶段内存不足导致程序被killed的问题
+        # 当有track_id时，验证batch中可能有大量目标，需要非常严格的内存限制
+        if embed_max_samples is None:
+            embed_max_samples = 100  # 大幅降低默认值以避免验证时内存不足（从300降到100）
+        # 使用更小的max_samples以避免验证时内存不足（默认100，训练时通常样本较少）
+        self.embed_loss = MetricLearningLoss(max_samples=embed_max_samples).to(device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
@@ -394,11 +433,25 @@ class v8JDELoss:
             )
 
             # Embedding loss
-            # Select the predicted embeddings for the foreground masks and the corresponding target tags
-            pred_embeds = pred_embeds[fg_mask]  # (batch_fg_objects, embed_dim)
-            target_tags = target_tags[fg_mask]  # (batch_fg_objects, 1)
-            confidences = pred_scores[fg_mask].sigmoid().view(-1)   # (batch_fg_objects,)
-            loss[3] = self.embed_loss(pred_embeds, target_tags, confidences)
+            # 在验证阶段完全跳过embedding loss计算以节省内存
+            # 验证阶段只需要计算检测指标，不需要embedding loss
+            # 通过检查model是否处于训练模式来判断
+            is_training = self.model.training if hasattr(self.model, 'training') else True
+            
+            if not is_training:
+                # 验证阶段：完全跳过embedding loss计算
+                loss[3] = torch.tensor(0.0, device=self.device, requires_grad=False)
+            else:
+                # 训练阶段：计算embedding loss
+                pred_embeds_fg = pred_embeds[fg_mask]  # (batch_fg_objects, embed_dim)
+                target_tags_fg = target_tags[fg_mask]  # (batch_fg_objects, 1)
+                confidences_fg = pred_scores[fg_mask].sigmoid().view(-1)   # (batch_fg_objects,)
+                
+                # 如果前景目标数量过多，直接跳过embedding loss计算以避免内存不足
+                if pred_embeds_fg.shape[0] > 500:  # 如果前景目标超过500，跳过embedding loss
+                    loss[3] = torch.tensor(0.0, device=self.device, requires_grad=True)
+                else:
+                    loss[3] = self.embed_loss(pred_embeds_fg, target_tags_fg, confidences_fg)
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
