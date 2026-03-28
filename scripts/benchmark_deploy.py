@@ -5,7 +5,7 @@
 
 在仓库根目录执行：
   python scripts/benchmark_deploy.py --modes all
-  python scripts/benchmark_deploy.py --modes pt_fp32,onnx_fp32,trt_fp32,trt_fp16
+  python scripts/benchmark_deploy.py --modes pt_fp32,onnx_fp32,trt_fp32,trt_fp16,trt_int8
 
 另支持：pt_fp16、trt_int8（需 data yaml）。
 

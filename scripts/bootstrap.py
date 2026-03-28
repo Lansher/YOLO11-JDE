@@ -12,7 +12,10 @@ def _numpy_compat_np_bool() -> None:
     import numpy as np
 
     if not hasattr(np, "bool"):
-        np.bool = np.bool_  # type: ignore[attr-defined,misc]
+        try:
+            np.bool = np.bool_  # type: ignore[attr-defined,misc]
+        except AttributeError:
+            np.bool = bool  # type: ignore[attr-defined,misc]
 
 
 def ensure_repo_root() -> None:
