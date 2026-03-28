@@ -1,9 +1,11 @@
 # YOLO11-JDE 项目完整记录
 
+> **文档关系**：架构见 [YOLO11-JDE架构分析.md](./YOLO11-JDE架构分析.md)；导出与测速见 [部署导出与测速.md](./部署导出与测速.md)；**Jetson / ONNX / NMS / benchmark** 见 [问题修复记录.md](./问题修复记录.md)。总索引：[README.md](./README.md)。
+
 ## 📋 目录
 
 1. [项目概述](#项目概述)
-2. [问题修复记录](#问题修复记录)
+2. [训练与验证侧修复（数据与指标）](#训练与验证侧修复数据与指标)
 3. [性能优化方案](#性能优化方案)
 4. [内存优化方案](#内存优化方案)
 5. [训练优化建议](#训练优化建议)
@@ -32,68 +34,15 @@
 
 ---
 
-## 问题修复记录
+## 训练与验证侧修复（数据与指标）
 
-### 1. 验证脚本问题修复
+**MOT 回调中「配置路径 / tqdm / seqmap / 预热」等**已集中写在 [问题修复记录.md §1](./问题修复记录.md)，以下仅保留 **MOT20 配置差异、标签/ReID 指标** 等本节特有内容。
 
-#### 1.1 配置文件路径错误
+### 1. MOT20 数据集与评估
 
-**问题**: `FileNotFoundError: [Errno 2] No such file or directory: './ultralytics/cfg/trackers/yolojdetracker.yaml'`
+#### 1.1 数据集自动检测
 
-**原因**: 使用相对路径，工作目录不是项目根目录时无法找到配置文件
-
-**解决方案**: 
-- 修改 `tracker/evaluation/mot_callback.py` 第 88-90 行
-- 使用 `__file__` 获取脚本绝对路径，动态构建配置文件路径
-
-```python
-# 获取项目根目录（向上3级目录从 tracker/evaluation/ 到项目根目录）
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-tracker_cfg_path = os.path.join(project_root, 'ultralytics', 'cfg', 'trackers', f'{tracker_name}.yaml')
-```
-
-#### 1.2 进度条卡在 0%
-
-**问题**: 进度条一直显示 `0%|0/3 [01:12<?, ?it/s]`，无法看到实际处理进度
-
-**解决方案**:
-- 添加图像过滤，提前过滤出有效的图像文件
-- 为图像处理循环添加 `tqdm` 进度条
-- 添加调试信息，显示序列信息和处理状态
-
-```python
-# 过滤出有效的图像文件
-imgs = [img for img in all_imgs if img.endswith('.jpg') or img.endswith('.png')]
-print(f"\n处理序列 {seq_name}: 共 {len(imgs)} 张图像")
-
-# 添加图像处理进度条
-for idx, img in enumerate(tqdm(imgs, desc=f"处理 {seq_name}", leave=False)):
-```
-
-#### 1.3 seqmap 文件缺失
-
-**问题**: `tracker.evaluation.TrackEval.trackeval.utils.TrackEvalException: no seqmap found: MOT20-train.txt`
-
-**解决方案**: 自动创建 seqmap 文件和目录
-
-```python
-# 创建seqmap文件
-seqmap_dir = os.path.join(dataset_root, 'seqmaps')
-os.makedirs(seqmap_dir, exist_ok=True)
-seqmap_file = os.path.join(seqmap_dir, 'MOT20-train.txt')
-# 如果seqmap文件不存在，创建它
-if not os.path.exists(seqmap_file):
-    with open(seqmap_file, 'w') as f:
-        f.write('name\n')  # 标题行
-        for seq in seq_names:
-            f.write(f'{seq}\n')
-```
-
-### 2. MOT20 数据集支持
-
-#### 2.1 数据集自动检测
-
-**修改位置**: `tracker/evaluation/mot_callback.py` 第 26-68 行
+**修改位置**: `tracker/evaluation/mot_callback.py`（路径以当前仓库为准）
 
 **功能**: 自动检测数据集类型（MOT17 或 MOT20），并设置相应的配置
 
@@ -114,9 +63,9 @@ if 'MOT20' in str(data_path) or 'mot20' in str(data_path).lower():
     seq_names = available_seqs
 ```
 
-#### 2.2 评估配置修改
+#### 1.2 评估配置修改
 
-**修改位置**: `tracker/evaluation/mot_callback.py` 第 210-223 行
+**修改位置**: `tracker/evaluation/mot_callback.py`
 
 **关键修改**:
 - 添加 `BENCHMARK` 参数以正确标识数据集类型
@@ -142,7 +91,7 @@ config = {
 }
 ```
 
-#### 2.3 内存优化和图像尺寸修复
+#### 1.3 内存优化和图像尺寸修复（验证回调）
 
 **问题**: 
 - 硬编码 `imgsz=1280`，在 CPU 模式下占用大量内存且速度慢
@@ -171,9 +120,9 @@ del det, result
 torch.cuda.empty_cache()  # 强制清理GPU缓存
 ```
 
-### 3. 标签验证逻辑修复
+### 2. 标签验证逻辑修复
 
-#### 3.1 支持 track_id 为 -1
+#### 2.1 支持 track_id 为 -1
 
 **问题**: MOT20_YOLO 数据集的标签文件使用 6 列格式，部分检测框的 `track_id` 为 `-1`，被错误地标记为损坏
 
@@ -187,9 +136,9 @@ else:
     assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
 ```
 
-### 4. ReID 指标计算修复
+### 3. ReID 指标计算修复
 
-#### 4.1 标签数量不足问题
+#### 3.1 标签数量不足问题
 
 **问题**: `ValueError: Number of labels is 1. Valid values are 2 to n_samples - 1 (inclusive)`
 
@@ -221,7 +170,7 @@ else:
         calinski_harabasz_score = 0.0
 ```
 
-#### 4.2 空数组问题
+#### 3.2 空数组问题
 
 **问题**: `ValueError: Found array with 0 sample(s) (shape=(0, 128)) while a minimum of 1 is required`
 

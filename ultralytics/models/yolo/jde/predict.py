@@ -27,8 +27,10 @@ class JDEPredictor(BasePredictor):
 
     def postprocess(self, preds, img, orig_imgs):
         """Applies non-max suppression and processes detections for each image in an input batch."""
+        # AutoBackend 单输出为 (B,C,N) Tensor；若错误地 preds[0] 会得到 (C,N)，NMS 维度假设会崩
+        p = preds[0] if isinstance(preds, (list, tuple)) else preds
         preds = ops.non_max_suppression(
-            preds[0],
+            p,
             self.args.conf,
             self.args.iou,
             agnostic=self.args.agnostic_nms,

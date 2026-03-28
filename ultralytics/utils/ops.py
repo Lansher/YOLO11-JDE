@@ -160,6 +160,48 @@ def nms_rotated(boxes, scores, threshold=0.45):
     return sorted_idx[pick]
 
 
+# torchvision C++ ops 与 NVIDIA Jetson 等环境下的 torch 常不兼容；失败后改用 OpenCV，不再每次尝试 torchvision。
+_torchvision_nms_usable = True
+
+
+def _nms_xyxy_opencv(boxes: torch.Tensor, scores: torch.Tensor, iou_thres: float) -> torch.Tensor:
+    """
+    不依赖 torchvision C++：cv2.dnn.NMSBoxes。须传 numpy（含多维数组），勿对数万框使用 .tolist()，否则极慢。
+    """
+    if boxes.numel() == 0:
+        return torch.empty(0, dtype=torch.long, device=boxes.device)
+
+    device = boxes.device
+    b = boxes.detach().float().cpu().numpy()
+    s = scores.detach().float().cpu().numpy()
+    xywh = np.empty((b.shape[0], 4), dtype=np.float32)
+    xywh[:, 0] = b[:, 0]
+    xywh[:, 1] = b[:, 1]
+    xywh[:, 2] = np.maximum(b[:, 2] - b[:, 0], 0.0)
+    xywh[:, 3] = np.maximum(b[:, 3] - b[:, 1], 0.0)
+    idx = cv2.dnn.NMSBoxes(xywh, s, 0.0, float(iou_thres))
+    if idx is None or len(idx) == 0:
+        return torch.empty(0, dtype=torch.long, device=device)
+    idx = np.asarray(idx, dtype=np.int64).reshape(-1)
+    return torch.from_numpy(idx).to(device=device)
+
+
+def nms_xyxy(boxes: torch.Tensor, scores: torch.Tensor, iou_thres: float) -> torch.Tensor:
+    """
+    轴对齐 NMS。优先 torchvision.ops.nms；若 C++ 扩展与当前 PyTorch 不匹配（常见于 Jetson 使用 NVIDIA 官方 torch + PyPI torchvision），
+    则退回 OpenCV NMSBoxes（numpy 直通，禁止大候选 .tolist）。
+    """
+    global _torchvision_nms_usable
+    if _torchvision_nms_usable:
+        try:
+            import torchvision
+
+            return torchvision.ops.nms(boxes, scores, iou_thres)
+        except RuntimeError:
+            _torchvision_nms_usable = False
+    return _nms_xyxy_opencv(boxes, scores, iou_thres)
+
+
 def non_max_suppression(
     prediction,
     conf_thres=0.25,
@@ -207,8 +249,6 @@ def non_max_suppression(
             shape (num_boxes, 6 + num_masks) containing the kept boxes, with columns
             (x1, y1, x2, y2, confidence, class, mask1, mask2, ...).
     """
-    import torchvision  # scope for faster 'import ultralytics'
-
     # Checks
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
     assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
@@ -289,7 +329,7 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+            i = nms_xyxy(boxes, scores, iou_thres)  # NMS（含 Jetson/torchvision ABI 回退）
         i = i[:max_det]  # limit detections
 
         # # Experimental

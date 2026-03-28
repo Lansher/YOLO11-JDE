@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from ultralytics.utils import ARM64, IS_JETSON, IS_RASPBERRYPI, LINUX, LOGGER, ROOT, yaml_load
+from ultralytics.utils import ARM64, LINUX, LOGGER, ROOT, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_version, check_yaml
 from ultralytics.utils.downloads import attempt_download_asset, is_url
 
@@ -182,13 +182,22 @@ class AutoBackend(nn.Module):
         # ONNX Runtime
         elif onnx:
             LOGGER.info(f"Loading {w} for ONNX Runtime inference...")
-            check_requirements(("onnx", "onnxruntime-gpu" if cuda else "onnxruntime"))
-            if IS_RASPBERRYPI or IS_JETSON:
-                # Fix 'numpy.linalg._umath_linalg' has no attribute '_ilp64' for TF SavedModel on RPi and Jetson
-                check_requirements("numpy==1.23.5")
+            # PyPI 无 linux aarch64 的 onnxruntime-gpu；Jetson 等 ARM64 设备只能用 onnxruntime（CPU EP）
+            if cuda and ARM64:
+                check_requirements(("onnx", "onnxruntime"))
+                LOGGER.warning(
+                    "ONNX Runtime on aarch64: pip 无 onnxruntime-gpu，使用 CPUExecutionProvider。"
+                    "若需 GPU 推理请用 TensorRT engine 或 PyTorch。"
+                )
+                providers = ["CPUExecutionProvider"]
+            elif cuda:
+                check_requirements(("onnx", "onnxruntime-gpu"))
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            else:
+                check_requirements(("onnx", "onnxruntime"))
+                providers = ["CPUExecutionProvider"]
+            # numpy==1.23.5 仅用于 ARM64 上 TensorFlow/TF.js 导出兼容性，勿在 ONNX Runtime 路径强制降级（会破坏 opencv 等依赖）
             import onnxruntime
-
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if cuda else ["CPUExecutionProvider"]
             session = onnxruntime.InferenceSession(w, providers=providers)
             output_names = [x.name for x in session.get_outputs()]
             metadata = session.get_modelmeta().custom_metadata_map

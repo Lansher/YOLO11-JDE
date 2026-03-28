@@ -55,6 +55,8 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 import warnings
 from copy import deepcopy
@@ -235,6 +237,11 @@ class Exporter:
                 "WARNING ⚠️ INT8 export requires a missing 'data' arg for calibration. "
                 f"Using default 'data={self.args.data}'."
             )
+        # Jetson 静态 FP32/FP16：若在本进程 deepcopy+GPU，再子进程建 TRT，显存仍不够（~7.4GB 卡上 TRT 单独即 ~7GB）。
+        # 必须在分配 im/model 到 GPU **之前** 分支：两段独立 Python 进程先后导出 ONNX（退出释 VRAM）再建 engine。
+        if engine and IS_JETSON and not self.args.int8 and not self.args.dynamic:
+            return self._export_jetson_engine_fully_isolated(model)
+
         # Input
         im = torch.zeros(self.args.batch, 3, *self.imgsz).to(self.device)
         file = Path(
@@ -398,7 +405,9 @@ class Exporter:
         """YOLOv8 ONNX export."""
         requirements = ["onnx>=1.12.0"]
         if self.args.simplify:
-            requirements += ["onnxslim==0.1.34", "onnxruntime" + ("-gpu" if torch.cuda.is_available() else "")]
+            # aarch64（Jetson）PyPI 无 onnxruntime-gpu，勿触发 pip 失败
+            use_gpu_ort = torch.cuda.is_available() and not ARM64
+            requirements += ["onnxslim==0.1.34", "onnxruntime" + ("-gpu" if use_gpu_ort else "")]
         check_requirements(requirements)
         import onnx  # noqa
 
@@ -415,6 +424,16 @@ class Exporter:
                 dynamic["output1"] = {0: "batch", 2: "mask_height", 3: "mask_width"}  # shape(1,32,160,160)
             elif isinstance(self.model, DetectionModel):
                 dynamic["output0"] = {0: "batch", 2: "anchors"}  # shape(1, 84, 8400)
+
+        # Jetson：静态 ONNX 默认在 GPU trace，结束后 PyTorch 仍占数 GB 显存，TRT tactic 需 ~800MB 时空闲不足会段错误
+        use_cpu_onnx_jetson = IS_JETSON and not dynamic and self.im.device.type == "cuda"
+        if use_cpu_onnx_jetson:
+            LOGGER.info(f"{prefix} Jetson: ONNX trace on CPU to free GPU before TensorRT build (slower export, safer VRAM)")
+            self.model, self.im = self.model.cpu(), self.im.cpu()
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
         torch.onnx.export(
             self.model.cpu() if dynamic else self.model,  # dynamic=True only compatible with cpu
@@ -447,7 +466,19 @@ class Exporter:
             meta = model_onnx.metadata_props.add()
             meta.key, meta.value = k, str(v)
 
+        # Jetson 等 aarch64 上部分 onnxruntime 轮仅支持 IR≤11；PyTorch 2.x 新导出常为 IR 13，需下调以加载
+        if model_onnx.ir_version > 11:
+            model_onnx.ir_version = 10
+
         onnx.save(model_onnx, f)
+
+        if use_cpu_onnx_jetson:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+        if use_cpu_onnx_jetson and self.args.format != "engine":
+            self.model, self.im = self.model.to(self.device), self.im.to(self.device)
         return f, model_onnx
 
     @try_export
@@ -681,11 +712,128 @@ class Exporter:
             ct_model.save(str(f))
         return f, ct_model
 
+    def _export_engine_isolated_child(self, prefix: str, f_onnx: str):
+        """Jetson 等对显存极敏感：父进程已加载 PyTorch 时，同进程内 TRT tactic 易差数百 MB 即崩溃；子进程仅 import TensorRT。"""
+        f = self.file.with_suffix(".engine")
+        script = Path(__file__).resolve().parent / "trt_isolated_builder.py"
+        if not script.is_file():
+            raise FileNotFoundError(f"Isolated TRT builder missing: {script}")
+        fd, meta_path = tempfile.mkstemp(suffix=".json", prefix="yolo_trt_meta_")
+        os.close(fd)
+        try:
+            Path(meta_path).write_text(json.dumps(self.metadata), encoding="utf-8")
+            cmd = [
+                sys.executable,
+                str(script),
+                "--onnx",
+                str(f_onnx),
+                "--engine",
+                str(f),
+                "--meta-json",
+                meta_path,
+                "--workspace-gb",
+                str(float(self.args.workspace)),
+            ]
+            if self.args.half:
+                cmd.append("--fp16")
+            if self.args.verbose:
+                cmd.append("--verbose")
+            if os.environ.get("ULTRALYTICS_TRT_FULL_TAC"):
+                cmd.append("--no-jetson-tac")
+            LOGGER.info(f"{prefix} Jetson: building in **child process** (no PyTorch/CUDA in builder) → {f}")
+            env_trt = os.environ.copy()
+            env_trt.setdefault("CUDA_MODULE_LOADING", "LAZY")
+            subprocess.run(cmd, check=True, env=env_trt)
+        finally:
+            Path(meta_path).unlink(missing_ok=True)
+        return f, None
+
+    def _export_jetson_engine_fully_isolated(self, model) -> str:
+        """Jetson 小显存：本进程绝不执行 deepcopy(model).cuda()；子进程 A 仅 ONNX（退出释 VRAM）→ 子进程 B 仅 TensorRT。"""
+        prefix = colorstr("TensorRT:")
+        LOGGER.info(
+            f"{prefix} Jetson: ONNX + TensorRT in **two fresh Python processes** "
+            f"(this process never allocates training/Export GPU tensors)"
+        )
+        try:
+            model.cpu()
+        except Exception as e:
+            LOGGER.warning(f"{prefix} model.cpu() before isolated export: {e}")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        file = Path(
+            getattr(model, "pt_path", None) or getattr(model, "yaml_file", None) or model.yaml.get("yaml_file", "")
+        )
+        if file.suffix in {".yaml", ".yml"}:
+            file = Path(file.name)
+        self.file = file
+        f_onnx = file.with_suffix(".onnx")
+        f_engine = file.with_suffix(".engine")
+
+        data = model.args["data"] if hasattr(model, "args") and isinstance(model.args, dict) else ""
+        pretty_name = Path(model.yaml.get("yaml_file", self.file)).stem.replace("yolo", "YOLO")
+        description = f'Ultralytics {pretty_name} model {f"trained on {data}" if data else ""}'
+        self.metadata = {
+            "description": description,
+            "author": "Ultralytics",
+            "date": datetime.now().isoformat(),
+            "version": __version__,
+            "license": "AGPL-3.0 License (https://ultralytics.com/license)",
+            "docs": "https://docs.ultralytics.com",
+            "stride": int(max(model.stride)),
+            "task": model.task,
+            "batch": self.args.batch,
+            "imgsz": self.imgsz,
+            "names": model.names,
+        }
+        if model.task == "pose":
+            self.metadata["kpt_shape"] = model.model[-1].kpt_shape
+
+        task = getattr(model, "task", "detect")
+        pt = str(file.resolve())
+        # 子进程 A：仅导出 ONNX，进程结束即释放该进程内所有 CUDA 显存
+        py_onnx = (
+            "from ultralytics import YOLO;"
+            f"m=YOLO({repr(pt)}, task={repr(task)});"
+            f"m.export(format='onnx', imgsz={repr(self.imgsz)}, batch={self.args.batch}, "
+            f"half=False, dynamic=False, simplify=True, device=0)"
+        )
+        env_onnx = os.environ.copy()
+        env_onnx.setdefault("CUDA_MODULE_LOADING", "LAZY")
+        LOGGER.info(f"{prefix} Jetson subprocess [1/2]: ONNX → {f_onnx}")
+        subprocess.run([sys.executable, "-c", py_onnx], check=True, env=env_onnx, cwd=str(file.parent.resolve()))
+        if not f_onnx.is_file():
+            raise FileNotFoundError(f"ONNX export subprocess did not produce {f_onnx}")
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        # 子进程 B：仅 TensorRT（trt_isolated_builder）
+        self._export_engine_isolated_child(prefix, str(f_onnx))
+        dt = 0.0  # timing not tracked here
+        LOGGER.info(f"{prefix} export success ✅ Jetson two-stage, saved as '{f_engine}' ({file_size(f_engine):.1f} MB)")
+        self.run_callbacks("on_export_end")
+        return str(f_engine.resolve())
+
     @try_export
     def export_engine(self, prefix=colorstr("TensorRT:")):
         """YOLOv8 TensorRT export https://developer.nvidia.com/tensorrt."""
         assert self.im.device.type != "cpu", "export running on CPU but must be on GPU, i.e. use 'device=0'"
         f_onnx, _ = self.export_onnx()  # run before TRT import https://github.com/ultralytics/ultralytics/issues/7016
+
+        # INT8 校准仍依赖 self.model；FP32/FP16 可立即释放权重，否则 TRT tactic 阶段显存不足（Jetson 易段错误）
+        if not self.args.int8:
+            del self.model
+            self.model = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
 
         try:
             import tensorrt as trt  # noqa
@@ -713,6 +861,16 @@ class Exporter:
             config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace)
         else:  # TensorRT versions 7, 8
             config.max_workspace_size = workspace
+        # Jetson：cuDNN tactic profiling 常瞬时申请 ~800MB+，空闲不足时直接段错误；限制来源可降峰值（引擎可能略慢）
+        if IS_JETSON and not os.environ.get("ULTRALYTICS_TRT_FULL_TAC"):
+            try:
+                TS = getattr(trt, "TacticSource", None)
+                if TS is not None:
+                    tac = (1 << int(TS.CUBLAS)) | (1 << int(TS.CUBLAS_LT))
+                    config.set_tactic_sources(tac)
+                    LOGGER.info(f"{prefix} Jetson: tactic_sources=cuBLAS/LT only (export ULTRALYTICS_TRT_FULL_TAC=1 to allow cuDNN tactics)")
+            except Exception as e:
+                LOGGER.warning(f"{prefix} could not restrict TRT tactic sources: {e}")
         flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
         network = builder.create_network(flag)
         half = builder.platform_has_fast_fp16 and self.args.half
@@ -798,10 +956,14 @@ class Exporter:
         elif half:
             config.set_flag(trt.BuilderFlag.FP16)
 
-        # Free CUDA memory
-        del self.model
+        # INT8 路径此时才可丢弃 PyTorch；再清空缓存供 tactic profiling
+        if self.model is not None:
+            del self.model
+            self.model = None
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         # Write file
         build = builder.build_serialized_network if is_trt10 else builder.build_engine

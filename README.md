@@ -162,9 +162,9 @@ L_total = λ_box * L_box + λ_cls * L_cls + λ_dfl * L_dfl + λ_clr * L_embed
 
 ---
 
-## 量化与推理加速（整合版）
+## 量化与推理加速
 
-本节整合自 `docs/YOLO11s_JDE_量化加速说明.md`。
+详见 **`docs/部署导出与测速.md`**；文档总索引见 **`docs/README.md`**。
 
 ### 推荐路径
 

@@ -1,5 +1,7 @@
 # YOLO11-JDE 架构分析文档
 
+> 与其它文档的分工见 [README.md](./README.md)（部署、问题修复、项目记录等）。
+
 ## 目录
 1. [项目概述](#项目概述)
 2. [整体架构](#整体架构)
@@ -408,9 +410,10 @@ class JDEPredictor(BasePredictor):
         self.args.task = "jde"
     
     def postprocess(self, preds, img, orig_imgs):
-        # 1. NMS过滤
+        # AutoBackend 单输出为 (B,C,N)；仅当 preds 为 list/tuple 时取 [0]，否则 preds[0] 会破坏 batch 维
+        p = preds[0] if isinstance(preds, (list, tuple)) else preds
         preds = ops.non_max_suppression(
-            preds[0],
+            p,
             self.args.conf,
             self.args.iou,
             agnostic=self.args.agnostic_nms,
@@ -418,20 +421,12 @@ class JDEPredictor(BasePredictor):
             nc=len(self.model.names),
             classes=self.args.classes,
         )
-        
-        # 2. 缩放边界框到原始图像尺寸
         results = []
         for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-            
-            # 3. 创建Results对象，包含embeddings
-            results.append(Results(
-                orig_img, 
-                path=img_path, 
-                names=self.model.names, 
-                boxes=pred[:, :6],      # [x1, y1, x2, y2, conf, cls]
-                embeds=pred[:, 6:]      # [embedding_128d]
-            ))
+            results.append(
+                Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], embeds=pred[:, 6:])
+            )
         return results
 ```
 

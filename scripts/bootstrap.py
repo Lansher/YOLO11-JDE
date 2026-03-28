@@ -7,7 +7,16 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _numpy_compat_np_bool() -> None:
+    """NumPy 2.0 起移除 np.bool；TensorRT 等旧绑定仍可能访问 np.bool。"""
+    import numpy as np
+
+    if not hasattr(np, "bool"):
+        np.bool = np.bool_  # type: ignore[attr-defined,misc]
+
+
 def ensure_repo_root() -> None:
     root = str(_REPO_ROOT)
     if root not in sys.path:
         sys.path.insert(0, root)
+    _numpy_compat_np_bool()
