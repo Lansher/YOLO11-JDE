@@ -17,7 +17,7 @@ We introduce YOLO11-JDE, a fast and accurate multi-object tracking (MOT) solutio
 
 ## Repository layout
 
-- **`scripts/`** — Training, tracking, validation, and MOT20 conversion entry scripts. The repository root keeps thin wrappers (e.g. `python train.py` → `scripts/train.py`). See `scripts/README.md`.
+- **`scripts/`** — Training, tracking, validation, and MOT20 conversion entry scripts. Run from repo root, e.g. `python scripts/train.py`. See `scripts/README.md`.
 - **`logs/`** — Default directory for `offline_train.py` output (ignored by git except `.gitkeep`).
 
 ---

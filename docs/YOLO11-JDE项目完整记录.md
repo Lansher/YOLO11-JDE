@@ -296,12 +296,12 @@ def get_metrics(self):
 
 2. **如果未转换，先转换**:
    ```bash
-   python convert_mot20_gt_to_yolo.py
+   python scripts/convert_mot20_gt_to_yolo.py
    ```
 
 3. **使用 GT 数据集训练**:
    ```bash
-   python train_with_tracks.py
+   python scripts/train_with_tracks.py
    ```
 
 **预期效果**:
@@ -582,7 +582,7 @@ torch.cuda.empty_cache()  # 强制清理GPU缓存
 
 ```bash
 cd /root/autodl-tmp/YOLO11-JDE
-python convert_mot20_gt_to_yolo.py \
+python scripts/convert_mot20_gt_to_yolo.py \
     --mot20_root /root/autodl-tmp/MOT20 \
     --output_dir /root/autodl-tmp/MOT20_YOLO_GT
 ```
@@ -600,7 +600,7 @@ head -5 /root/autodl-tmp/MOT20_YOLO_GT/labels/train/*.txt | head -20
 #### 步骤2: 使用新数据集训练（必须）
 
 ```bash
-python train_with_tracks.py
+python scripts/train_with_tracks.py
 ```
 
 **关键配置**:
@@ -635,12 +635,12 @@ python evolve_mot20.py \
 
 1. **转换 GT 数据集**（30 分钟）
    ```bash
-   python convert_mot20_gt_to_yolo.py
+   python scripts/convert_mot20_gt_to_yolo.py
    ```
 
 2. **使用新数据集训练**（数小时）
    ```bash
-   python train_with_tracks.py
+   python scripts/train_with_tracks.py
    ```
 
 这两步就能带来显著提升！
@@ -697,8 +697,8 @@ python evolve_mot20.py \
 
 ### 创建的文件
 
-1. `convert_mot20_gt_to_yolo.py` - GT 标注转换脚本
-2. `train_with_tracks.py` - 使用 track ID 的训练脚本
+1. `scripts/convert_mot20_gt_to_yolo.py` - GT 标注转换脚本
+2. `scripts/train_with_tracks.py` - 使用 track ID 的训练脚本
 3. `train_optimized.py` - 优化后的训练脚本
 4. `evolve_mot20.py` - MOT20 专用的 tracker 超参数优化
 5. `jdetracker_mot20_optimized.yaml` - 优化后的 tracker 配置

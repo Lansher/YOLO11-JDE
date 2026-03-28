@@ -1,6 +1,13 @@
 # 项目脚本说明
 
-可执行脚本集中在 `scripts/`。仓库根目录下的同名 `.py` 为**薄包装**，仅转发到此目录，便于保持原有命令习惯（例如 `python train.py`）。
+可执行脚本集中在 `scripts/`。请在**仓库根目录**下运行，例如：
+
+```bash
+python scripts/train.py
+python scripts/track.py
+```
+
+`bootstrap.py` 会在需要时将仓库根目录加入 `sys.path`，以便导入顶层包 `tracker` 等。
 
 ## 脚本列表
 
@@ -15,15 +22,18 @@
 | `debug.py` | 小规模调试训练 |
 | `convert_mot20_gt_to_yolo.py` | MOT20 GT → YOLO 格式（含 track ID） |
 | `offline_train.py` | 后台启动 `scripts/train.py`，日志写入 `logs/` |
+| `benchmark_deploy.py` | 部署/基准相关脚本 |
+| `heatmap_video.py` | 轨迹累积热力视频 |
+| `gradcam_video.py` / `gradcam_image.py` | Grad-CAM 可视化 |
 
 ## 运行方式
 
 在**仓库根目录**下：
 
 ```bash
-python train.py
-# 或
 python scripts/train.py
+# 或
+cd scripts && python train.py   # 亦可；bootstrap 会处理路径
 ```
 
 直接运行 `scripts/` 内脚本时，`bootstrap` 会保证能导入顶层包 `tracker`。
