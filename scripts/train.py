@@ -2,8 +2,8 @@ from bootstrap import ensure_repo_root
 
 ensure_repo_root()
 
-import comet_ml
 from ultralytics import YOLO
+import torch
 from datetime import datetime
 from functools import partial
 
@@ -19,10 +19,19 @@ os.environ['VECLIB_MAXIMUM_THREADS'] = N_THREADS
 os.environ['NUMEXPR_NUM_THREADS'] = N_THREADS
 """
 
-# Initialize COMET logger, first log done in notebook where API key was asked, now seems to be saved in .comet.config
-from ultralytics.utils import SETTINGS
-SETTINGS['comet'] = True  # set True to log using Comet.ml
-comet_ml.init()
+# Initialize COMET logger (optional)
+try:
+    import comet_ml
+
+    # first log done in notebook where API key was asked, now seems to be saved in .comet.config
+    from ultralytics.utils import SETTINGS
+
+    SETTINGS["comet"] = True
+    comet_ml.init()
+except ModuleNotFoundError:
+    from ultralytics.utils import SETTINGS
+
+    SETTINGS["comet"] = False
 
 from tracker.evaluation.mot_callback import mot_eval
 
@@ -33,6 +42,11 @@ model = YOLO('yolo11s-jde.yaml', task='jde').load(pre_trained_model)
 epochs = 10
 batch = 8
 
+# Ultralytics 的 device 参数需要与当前环境匹配：
+# - 当前环境无 CUDA 时，device=[0] 会报 Invalid CUDA
+# - 有 CUDA 时默认用第 0 张卡
+device = [0] if torch.cuda.is_available() else "cpu"
+
 model.add_callback("on_val_end", partial(mot_eval, period=epochs))   # Evaluate every X epochs
 model.train(
     project='reid_xps',
@@ -41,7 +55,7 @@ model.train(
     data='/root/autodl-tmp/MOT20_YOLO_label/MOT20_GT.yaml',
     epochs=epochs,
     batch=batch,
-    device=[0],
+    device=device,
     # bbox_erase=0.1,
     imgsz=1280,
     # clr=0.5,

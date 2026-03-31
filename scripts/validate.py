@@ -16,8 +16,8 @@ model.val(
     project='reid_xps',
     name=f'MOT20-test',
     data='/root/autodl-tmp/MOT20_YOLO_label/MOT20_label.yaml',
-    imgsz=640,
-    device='0',  # 使用CPU，因为没有可用的CUDA设备
+    imgsz=1280,
+    device='0',  
     #max_det=150,
     tracker='yolojdetracker.yaml',
     half=False,

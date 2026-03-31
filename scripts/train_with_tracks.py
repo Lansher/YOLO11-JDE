@@ -9,6 +9,7 @@ ensure_repo_root()
 
 import comet_ml
 from ultralytics import YOLO
+import torch
 from datetime import datetime
 from functools import partial
 
@@ -32,7 +33,7 @@ comet_ml.init()
 from tracker.evaluation.mot_callback import mot_eval
 
 # 使用预训练模型
-pre_trained_model = '/root/autodl-tmp/YOLO11-JDE/YOLO11s_JDE-CHMOT17-64b-100e_TBHS_m075_1280px.pt'
+pre_trained_model = '/home/bns/sevenT/ly/YOLO11-JDE/YOLO11s_JDE-CHMOT17-64b-100e_TBHS_m075_1280px.pt'
 model = YOLO('yolo11s-jde.yaml', task='jde').load(pre_trained_model)
 
 # ========== 训练配置 ==========
@@ -42,6 +43,11 @@ batch = 8  # 根据GPU内存调整，如果内存充足可以增加到16
 # 可选：启用MOT评估回调（如果内存充足）
 # 注意：MOT评估会消耗额外内存，如果遇到内存不足可以禁用
 # model.add_callback("on_val_end", partial(mot_eval, period=epochs))
+
+if not torch.cuda.is_available():
+    raise RuntimeError("当前环境未检测到可用 CUDA。为确保 GPU-only，请先修复 torch CUDA 依赖。")
+
+device = [0]
 
 model.train(
     project='reid_xps',
@@ -57,7 +63,7 @@ model.train(
     
     epochs=epochs,
     batch=batch,
-    device=[0],
+    device=device,
     
     # ========== 学习率优化 ==========
     lr0=0.001,  # 降低初始学习率，适合fine-tuning
