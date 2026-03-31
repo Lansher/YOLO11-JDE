@@ -5,6 +5,7 @@ import time
 import numpy as np
 import pandas as pd
 import torch
+import re
 from tqdm import tqdm
 from types import SimpleNamespace
 
@@ -25,36 +26,77 @@ def mot_eval(validator, period=1):
     # 检测数据集类型：如果数据路径包含 MOT20，使用 MOT20，否则使用 MOT17
     data_path = getattr(validator.args, 'data', '')
     if 'MOT20' in str(data_path) or 'mot20' in str(data_path).lower():
-        # 使用 MOT20 数据集
-        dataset_name = 'MOT20/train'  # MOT20 验证集在 train 目录中（MOT20-02, MOT20-03, MOT20-05）
-        # 使用原始 MOT20 数据集路径
-        mot20_root = '/root/autodl-tmp/MOT20'
-        dataset_root = os.path.join(mot20_root, 'train')
-        # MOT20 验证序列：MOT20-02, MOT20-03, MOT20-05
-        # 检查序列是否存在
-        available_seqs = []
-        for seq in ['MOT20-02', 'MOT20-03', 'MOT20-05']:
-            seq_path = os.path.join(dataset_root, seq)
-            if os.path.exists(seq_path) and os.path.exists(os.path.join(seq_path, 'img1')):
-                available_seqs.append(seq)
-        seq_names = available_seqs
+        # MOT20 的 TrackEval 评测不使用 YOLO labels 的内容，
+        # 但需要知道应该评测哪些序列（seq 名称），以及这些序列的 GT/图像实际在 MOT20 的 train/test 目录里。
+        # 这里按 ultralytics 传入的 split（validator.args.split）读取 labels/<split> 中出现的序列，
+        # 然后映射到 datasets/MOT20/<train|test> 目录执行评测。
+        yolo_split = getattr(validator.args, 'split', None) or 'val'
+        motchallenge_split = 'test' if yolo_split == 'test' else 'train'
+
+        # 优先使用环境变量覆盖；默认使用项目内 datasets 目录。
+        mot20_root = os.environ.get('MOT20_ROOT', '/home/bns/sevenT/ly/datasets/MOT20')
+
+        # 解析 ultralytics 的 data yaml，取出 dataset path
+        mot20_yolo_yaml = getattr(validator.args, 'data', '')
+        yolo_root = ''
+        try:
+            if mot20_yolo_yaml and os.path.isfile(mot20_yolo_yaml):
+                yolo_cfg = yaml.safe_load(open(mot20_yolo_yaml, 'r'))
+                yolo_root = yolo_cfg.get('path', '')
+        except Exception as e:
+            print(f'WARNING: failed to parse MOT20 yolo yaml: {mot20_yolo_yaml}, err={e}')
+
+        labels_dir = os.path.join(yolo_root, 'labels', yolo_split) if yolo_root else ''
+        seq_set = set()
+        if labels_dir and os.path.isdir(labels_dir):
+            for fn in os.listdir(labels_dir):
+                m = re.match(r'^(MOT20-\d+)_', fn)
+                if m:
+                    seq_set.add(m.group(1))
+        seq_names = sorted(seq_set)
+
+        # 如果提取不到序列，回退到扫描 MOT20/<split> 目录
         if len(seq_names) == 0:
-            print("WARNING: No MOT20 validation sequences found. Skipping MOT evaluation.")
+            dataset_root = os.path.join(mot20_root, motchallenge_split)
+            if os.path.exists(dataset_root):
+                seq_names = [
+                    d for d in os.listdir(dataset_root)
+                    if os.path.isdir(os.path.join(dataset_root, d)) and os.path.exists(os.path.join(dataset_root, d, 'img1'))
+                ]
+
+        if len(seq_names) == 0:
+            print(f"WARNING: No MOT20 sequences found for yolo_split={yolo_split}. Skipping MOT evaluation.")
             return
-        # 创建seqmap文件
+
+        dataset_root = os.path.join(mot20_root, motchallenge_split)
+        dataset_name = f'MOT20/{motchallenge_split}'
+
+        # TrackEval 计算 HOTA/MOTA 需要 MOTChallenge GT 文件：{GT_FOLDER}/{seq}/gt/gt.txt
+        # 你的 datasets/MOT20/test 里通常没有 gt，因此这里先过滤掉没有 GT 的序列，避免中途崩溃。
+        seq_names = [
+            s for s in seq_names
+            if os.path.isfile(os.path.join(dataset_root, s, 'gt', 'gt.txt'))
+        ]
+        if len(seq_names) == 0:
+            print(
+                f"WARNING: No MOT20 GT found under GT_FOLDER={dataset_root} "
+                f"for yolo_split={yolo_split}. Skipping HOTA/MOTA."
+            )
+            return
+
+        # 创建/覆盖 seqmap 文件
         seqmap_dir = os.path.join(dataset_root, 'seqmaps')
         os.makedirs(seqmap_dir, exist_ok=True)
-        seqmap_file = os.path.join(seqmap_dir, 'MOT20-train.txt')
-        # 如果seqmap文件不存在，创建它
-        if not os.path.exists(seqmap_file):
-            with open(seqmap_file, 'w') as f:
-                f.write('name\n')  # 标题行
-                for seq in seq_names:
-                    f.write(f'{seq}\n')
-            print(f"已创建seqmap文件: {seqmap_file}")
+        seqmap_file = os.path.join(seqmap_dir, f'MOT20-{motchallenge_split}.txt')
+        with open(seqmap_file, 'w') as f:
+            f.write('name\n')
+            for seq in seq_names:
+                f.write(f'{seq}\n')
+        print(f"已创建seqmap文件: {seqmap_file} (seqs={len(seq_names)})")
     else:
         # 默认使用 MOT17
         dataset_name = 'MOT17/val_half'
+        motchallenge_split = 'val_half'
         seqmap_file = './tracker/evaluation/TrackEval/data/gt/mot_challenge/seqmaps/MOT17-val_half.txt'
         dataset_root = os.path.join('./tracker/evaluation/TrackEval/data/gt/mot_challenge/', dataset_name)
         if os.path.exists(dataset_root):
@@ -217,7 +259,7 @@ def mot_eval(validator, period=1):
         'SKIP_SPLIT_FOL': True,
         'SEQMAP_FILE': seqmap_file,
         'BENCHMARK': benchmark,  # 设置基准名称
-        'SPLIT_TO_EVAL': 'train' if 'MOT20' in dataset_name else 'val_half',  # MOT20 验证集在 train 目录
+        'SPLIT_TO_EVAL': motchallenge_split,
         'PRINT_CONFIG': False,
         'PRINT_RESULTS': False,
     }

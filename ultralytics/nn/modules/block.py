@@ -49,6 +49,7 @@ __all__ = (
     "Attention",
     "PSA",
     "SCDown",
+    "EMA",
 )
 
 
@@ -1106,3 +1107,55 @@ class SCDown(nn.Module):
     def forward(self, x):
         """Applies convolution and downsampling to the input tensor in the SCDown module."""
         return self.cv2(self.cv1(x))
+
+
+class EMA(nn.Module):
+    """
+    Efficient Multi-Scale Attention Module with Cross-Spatial Learning.
+
+    论文: https://arxiv.org/abs/2305.13563
+    实现为通道保持模块：输入/输出通道数一致，方便在 YOLO11 结构中直接插入。
+    """
+
+    def __init__(self, c1: int, factor: int = 8):
+        """
+        Args:
+            c1: 输入/输出通道数。
+            factor: 分组数（默认 8），要求 c1 能被整除。
+        """
+        super().__init__()
+        self.groups = factor
+        channels = c1
+        assert channels % self.groups == 0 and channels // self.groups > 0, "EMA: 通道数必须能整除 factor"
+
+        self.softmax = nn.Softmax(-1)
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+
+        c_group = channels // self.groups
+        self.gn = nn.GroupNorm(c_group, c_group)
+        self.conv1x1 = nn.Conv2d(c_group, c_group, kernel_size=1, stride=1, padding=0)
+        self.conv3x3 = nn.Conv2d(c_group, c_group, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.size()
+        g = self.groups
+        assert c % g == 0, "EMA: 输入通道数必须能被 groups 整除"
+
+        group_x = x.view(b * g, c // g, h, w)  # (b*g, c//g, h, w)
+        x_h = self.pool_h(group_x)
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [h, w], dim=2)
+
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x2 = self.conv3x3(group_x)
+
+        x11 = self.softmax(self.agp(x1).view(b * g, -1, 1).permute(0, 2, 1))
+        x12 = x2.view(b * g, c // g, -1)
+        x21 = self.softmax(self.agp(x2).view(b * g, -1, 1).permute(0, 2, 1))
+        x22 = x1.view(b * g, c // g, -1)
+
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).view(b * g, 1, h, w)
+        return (group_x * weights.sigmoid()).view(b, c, h, w)

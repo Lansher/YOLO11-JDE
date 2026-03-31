@@ -43,6 +43,7 @@ from ultralytics.nn.modules import (
     Detect,
     DWConv,
     DWConvTranspose2d,
+    EMA,
     Focus,
     GhostBottleneck,
     GhostConv,
@@ -1041,6 +1042,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 n = 1
             if m is C3k2 and scale in "mlx":  # for M/L/X sizes
                 args[3] = True
+        elif m is EMA:
+            # 通道保持注意力模块：输入输出通道一致，args 可选传入 factor
+            c1 = ch[f]
+            c2 = ch[f]
+            args = [c1, *args]  # [c1] 或 [c1, factor]
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in {HGStem, HGBlock}:
